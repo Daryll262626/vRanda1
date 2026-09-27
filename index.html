@@ -18,7 +18,7 @@
 
             <label>Select Account</label>
 
-            <select id="loginUsername">
+            <select id="loginUsername" onkeydown="if(event.key === 'Enter'){ login(); }">
                 <option value="">Select Account</option>
                 <option value="admin">Admin</option>
                 <option value="staff">Staff</option>
@@ -28,6 +28,7 @@
                 id="loginPassword"
                 type="password"
                 placeholder="Enter Password"
+                onkeydown="if(event.key === 'Enter'){ login(); }"
             >
 
             <button onclick="login()">Login</button>
