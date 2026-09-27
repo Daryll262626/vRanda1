@@ -129,9 +129,12 @@ button {
 }
 
 .navitem.active {
-    background: #550000;
+    background: linear-gradient(135deg, #7d001c, #550000);
     color: white;
     padding: 9px 10px;
+    border: 1px solid #7d001c;
+    box-shadow: 0 6px 14px rgba(85, 0, 0, 0.18);
+    font-weight: bold;
 }
 
 .navitem:hover {
