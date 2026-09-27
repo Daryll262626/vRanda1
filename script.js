@@ -204,7 +204,85 @@ function go(id) {
     render();
 }
 
+function getVisibleNavItems() {
+    let items = [];
 
+    for (let g = 0; g < NAV.length; g++) {
+        const groupItems = NAV[g].items;
+
+        for (let i = 0; i < groupItems.length; i++) {
+            const id = groupItems[i][0];
+
+            if (
+                currentUser &&
+                currentUser.role === "Staff" &&
+                STAFF_ALLOWED.indexOf(id) === -1
+            ) {
+                continue;
+            }
+
+            items[items.length] = id;
+        }
+    }
+
+    return items;
+}
+
+function moveSectionByKey(direction) {
+    const items = getVisibleNavItems();
+
+    if (!items.length) {
+        return;
+    }
+
+    let index = items.indexOf(activeSection);
+
+    if (index === -1) {
+        index = direction === "down" ? 0 : items.length - 1;
+    } else {
+        index =
+            direction === "down"
+                ? index + 1
+                : index - 1;
+
+        if (index < 0) {
+            index = items.length - 1;
+        }
+
+        if (index >= items.length) {
+            index = 0;
+        }
+    }
+
+    activeSection = items[index];
+    render();
+}
+
+function handleSectionKeyboard(event) {
+    if (!currentUser) {
+        return;
+    }
+
+    const tag = document.activeElement && document.activeElement.tagName;
+
+    if (
+        tag === "INPUT" ||
+        tag === "SELECT" ||
+        tag === "TEXTAREA"
+    ) {
+        return;
+    }
+
+    if (event.key === "ArrowDown") {
+        event.preventDefault();
+        moveSectionByKey("down");
+    }
+
+    if (event.key === "ArrowUp") {
+        event.preventDefault();
+        moveSectionByKey("up");
+    }
+}
 
 function setFlash(text, type = "ok") {
     flashMsg = {
@@ -333,12 +411,139 @@ function availableTableCount() {
     let count = 0;
 
     for (let i = 0; i < tables.length; i++) {
-        if (tables[i].status === "available") {
+        if (tableAvailableSeats(tables[i]) > 0) {
             count++;
         }
     }
 
     return count;
+}
+
+function tableAllocations(table) {
+    if (!Array.isArray(table.allocations)) {
+        table.allocations = [];
+    }
+
+    return table.allocations;
+}
+
+function tableUsedSeats(table) {
+    const allocations = tableAllocations(table);
+    let used = 0;
+
+    for (let i = 0; i < allocations.length; i++) {
+        used += allocations[i].seats;
+    }
+
+    return used;
+}
+
+function tableAvailableSeats(table) {
+    const freeSeats = Math.max(0, table.seats - tableUsedSeats(table));
+
+    if (freeSeats === table.seats) {
+        return freeSeats;
+    }
+
+    return Math.floor(freeSeats / 2) * 2;
+}
+
+function seatsRequiredForParty(table, guests) {
+    if (guests >= table.seats) {
+        return table.seats;
+    }
+
+    return Math.ceil(guests / 2) * 2;
+}
+
+function updateTableStatus(table) {
+    const used = tableUsedSeats(table);
+
+    if (used === 0) {
+        table.status = "available";
+        return;
+    }
+
+    const allocations = tableAllocations(table);
+    let occupied = false;
+
+    for (let i = 0; i < allocations.length; i++) {
+        if (allocations[i].status === "occupied") {
+            occupied = true;
+            break;
+        }
+    }
+
+    if (tableAvailableSeats(table) > 0) {
+        table.status = occupied
+            ? "partially occupied"
+            : "partially reserved";
+    } else {
+        table.status = occupied ? "occupied" : "reserved";
+    }
+}
+
+function allocateTableSeats(table, type, id, seats, status) {
+    const allocations = tableAllocations(table);
+
+    allocations[allocations.length] = {
+        type: type,
+        id: id,
+        seats: seats,
+        status: status
+    };
+
+    updateTableStatus(table);
+}
+
+function updateTableAllocationStatus(tableNumber, type, id, status) {
+    for (let i = 0; i < tables.length; i++) {
+        const table = tables[i];
+
+        if (Number(table.number) !== Number(tableNumber)) {
+            continue;
+        }
+
+        const allocations = tableAllocations(table);
+
+        for (let j = 0; j < allocations.length; j++) {
+            if (
+                allocations[j].type === type &&
+                allocations[j].id === id
+            ) {
+                allocations[j].status = status;
+                updateTableStatus(table);
+                return;
+            }
+        }
+    }
+}
+
+function releaseTableSeats(tableNumber, type, id) {
+    for (let i = 0; i < tables.length; i++) {
+        const table = tables[i];
+
+        if (Number(table.number) !== Number(tableNumber)) {
+            continue;
+        }
+
+        const allocations = tableAllocations(table);
+        const remainingAllocations = [];
+
+        for (let j = 0; j < allocations.length; j++) {
+            if (
+                allocations[j].type !== type ||
+                allocations[j].id !== id
+            ) {
+                remainingAllocations[remainingAllocations.length] =
+                    allocations[j];
+            }
+        }
+
+        table.allocations = remainingAllocations;
+        updateTableStatus(table);
+        return;
+    }
 }
 
 
@@ -631,22 +836,37 @@ function updateReservationTotal() {
         adult + kid + senior;
 }
 
-function conflict(table, date, time, ignore) {
+function conflict(tableNumber, date, time, ignore, guests) {
+    let reservedSeats = 0;
+    let table = null;
+
+    for (let i = 0; i < tables.length; i++) {
+        if (Number(tables[i].number) === Number(tableNumber)) {
+            table = tables[i];
+            break;
+        }
+    }
+
+    if (!table) {
+        return true;
+    }
+
     for (let i = 0; i < reservations.length; i++) {
         const r = reservations[i];
 
         if (
             r.id !== ignore &&
             r.status !== "cancelled" &&
+            r.status !== "completed" &&
             Number(r.tableNumber) === Number(table) &&
             r.date === date &&
             r.time === time
         ) {
-            return true;
+            reservedSeats += seatsRequiredForParty(table, r.guests);
         }
     }
 
-    return false;
+    return reservedSeats + seatsRequiredForParty(table, guests) > table.seats;
 }
 
 function addReservation() {
@@ -934,7 +1154,7 @@ function filterCancelReservations() {
             .toLowerCase();
 
         if (!q || term.includes(q)) {
-            list.push(reservations[i]);
+            list[list.length] = reservations[i];
         }
     }
 
@@ -987,11 +1207,7 @@ function cancelReservationById(id) {
     }
 
     if (r.tableNumber) {
-        for (let i = 0; i < tables.length; i++) {
-            if (tables[i].number === r.tableNumber) {
-                tables[i].status = "available";
-            }
-        }
+        releaseTableSeats(r.tableNumber, "reservation", r.id);
     }
 
     for (
@@ -1130,16 +1346,17 @@ function renderTableAvailability() {
 
     for (let i = 0; i < tables.length; i++) {
         const t = tables[i];
+        const freeSeats = tableAvailableSeats(t);
 
         total++;
 
-        if (t.status === "occupied") {
+        if (freeSeats === 0 && tableUsedSeats(t) > 0) {
             occupied++;
-        } else if (t.status === "reserved") {
+        } else if (freeSeats === 0) {
             reserved++;
         } else {
             available++;
-            seats += t.seats;
+            seats += freeSeats;
         }
     }
 
@@ -1147,6 +1364,7 @@ function renderTableAvailability() {
 
     for (let i = 0; i < tables.length; i++) {
         const t = tables[i];
+        const freeSeats = tableAvailableSeats(t);
         let r = null;
 
         for (let j = 0; j < reservations.length; j++) {
@@ -1167,8 +1385,8 @@ function renderTableAvailability() {
         rows += `
             <tr>
                 <td>Table ${t.number}</td>
-                <td>${t.seats}</td>
-                <td>${t.status}</td>
+                <td>${t.seats} (${freeSeats} free)</td>
+                <td>${tableStatusLabel(t)}</td>
                 <td>${r ? r.date : "—"}</td>
                 <td>${r ? r.time : "—"}</td>
             </tr>
@@ -1229,6 +1447,23 @@ function renderTableAvailability() {
     `;
 }
 
+function tableStatusLabel(table) {
+    const used = tableUsedSeats(table);
+    const free = tableAvailableSeats(table);
+
+    if (used === 0) {
+        return "Available";
+    }
+
+    if (free === 0) {
+        return table.status === "reserved"
+            ? "Reserved"
+            : "Occupied";
+    }
+
+    return `${table.seats - free}/${table.seats} used, ${free} free`;
+}
+
 
 
 function renderAssignTable() {
@@ -1248,7 +1483,7 @@ function renderAssignTable() {
             <div class="card">
                 ${head(
                     "Assign a Table",
-                    "Assign the first available table that fits the party."
+                    "Assign available movable table capacity to the party."
                 )}
 
                 ${flash()}
@@ -1275,7 +1510,7 @@ function renderAssignTable() {
         <div class="card">
             ${head(
                 "Assign a Table",
-                "Find the first available table with enough seats."
+                "Find the first table with enough movable seats."
             )}
 
             ${flash()}
@@ -1329,21 +1564,27 @@ function assignTable() {
         const t = tables[i];
 
         if (
-            t.status === "available" &&
-            t.seats >= res.guests
+            tableAvailableSeats(t) >= seatsRequiredForParty(t, res.guests)
         ) {
             if (
                 conflict(
                     t.number,
                     res.date,
                     res.time,
-                    res.id
+                    res.id,
+                    res.guests
                 )
             ) {
                 continue;
             }
 
-            t.status = "reserved";
+            allocateTableSeats(
+                t,
+                "reservation",
+                res.id,
+                seatsRequiredForParty(t, res.guests),
+                "reserved"
+            );
             res.tableNumber = t.number;
 
             setFlash(
@@ -1544,8 +1785,8 @@ function addWalkIn() {
 
     for (let i = 0; i < tables.length; i++) {
         if (
-            tables[i].status === "available" &&
-            tables[i].seats >= size
+            tableAvailableSeats(tables[i]) >=
+                seatsRequiredForParty(tables[i], size)
         ) {
             chosen = tables[i];
             break;
@@ -1565,12 +1806,17 @@ function addWalkIn() {
     };
 
     if (chosen) {
-        chosen.status = "occupied";
-
         w.status = "seated";
         w.tableNumber = chosen.number;
         w.checkInTime =
             new Date().toLocaleString();
+        allocateTableSeats(
+            chosen,
+            "walkin",
+            w.id,
+            seatsRequiredForParty(chosen, w.size),
+            "occupied"
+        );
 
         activeWalkIns[
             activeWalkIns.length
@@ -1608,8 +1854,8 @@ function serveNextWalkIn() {
 
     for (let i = 0; i < tables.length; i++) {
         if (
-            tables[i].status === "available" &&
-            tables[i].seats >= w.size
+            tableAvailableSeats(tables[i]) >=
+                seatsRequiredForParty(tables[i], w.size)
         ) {
             chosen = tables[i];
             break;
@@ -1636,12 +1882,17 @@ function serveNextWalkIn() {
 
     waitlist.length--;
 
-    chosen.status = "occupied";
-
     w.status = "seated";
     w.tableNumber = chosen.number;
     w.checkInTime =
         new Date().toLocaleString();
+    allocateTableSeats(
+        chosen,
+        "walkin",
+        w.id,
+        seatsRequiredForParty(chosen, w.size),
+        "occupied"
+    );
 
     activeWalkIns[
         activeWalkIns.length
@@ -1774,15 +2025,12 @@ function checkInGuest(id) {
         now.toLocaleString();
 
     if (r.tableNumber) {
-        for (let i = 0; i < tables.length; i++) {
-            if (
-                tables[i].number ===
-                r.tableNumber
-            ) {
-                tables[i].status =
-                    "occupied";
-            }
-        }
+        updateTableAllocationStatus(
+            r.tableNumber,
+            "reservation",
+            r.id,
+            "occupied"
+        );
     }
 
     setFlash(
@@ -2727,19 +2975,11 @@ function processPayment() {
     }
 
     if (currentOrder.tableNumber) {
-        for (
-            let i = 0;
-            i < tables.length;
-            i++
-        ) {
-            if (
-                tables[i].number ===
-                currentOrder.tableNumber
-            ) {
-                tables[i].status =
-                    "available";
-            }
-        }
+        releaseTableSeats(
+            currentOrder.tableNumber,
+            currentOrder.sourceType,
+            currentOrder.sourceId
+        );
     }
 
     setFlash(
@@ -3261,5 +3501,7 @@ function render() {
 
     setDateLimits();
 }
+
+document.addEventListener("keydown", handleSectionKeyboard);
 
 tick();
