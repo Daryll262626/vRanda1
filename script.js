@@ -14,14 +14,17 @@ const USERS = [
 const STAFF_ALLOWED = [
     "reservations",
     "findReservation",
+    "cancelReservation",
+    "sortReservations",
+    "diningMonitor",
     "tableAvailability",
     "assignTable",
     "waitlist",
     "checkIn",
+    "guestCount",
     "billSummary",
     "discounts",
-    "payment",
-    "receipts"
+    "payment"
 ];
 
 const packages = [
@@ -40,17 +43,32 @@ const packages = [
 ];
 
 const tables = [
-    { number: 1, seats: 2, status: "available" },
-    { number: 2, seats: 2, status: "available" },
+    { number: 1, seats: 4, status: "available" },
+    { number: 2, seats: 4, status: "available" },
     { number: 3, seats: 4, status: "available" },
     { number: 4, seats: 4, status: "available" },
-    { number: 5, seats: 6, status: "available" },
-    { number: 6, seats: 8, status: "available" },
-    { number: 7, seats: 8, status: "available" },
-    { number: 8, seats: 10, status: "available" },
-    { number: 9, seats: 10, status: "available" },
-    { number: 10, seats: 11, status: "available" }
+    { number: 5, seats: 4, status: "available" },
+    { number: 6, seats: 6, status: "available" },
+    { number: 7, seats: 6, status: "available" },
+    { number: 8, seats: 6, status: "available" },
+    { number: 9, seats: 6, status: "available" },
+    { number: 10, seats: 6, status: "available" },
+    { number: 11, seats: 8, status: "available" },
+    { number: 12, seats: 8, status: "available" },
+    { number: 13, seats: 8, status: "available" },
+    { number: 14, seats: 8, status: "available" },
+    { number: 15, seats: 8, status: "available" },
+    { number: 16, seats: 10, status: "available" },
+    { number: 17, seats: 10, status: "available" },
+    { number: 18, seats: 10, status: "available" },
+    { number: 19, seats: 10, status: "available" },
+    { number: 20, seats: 20, status: "available" }
 ];
+
+const RESERVATION_STORAGE_KEY = "verandaReservations";
+const STAFF_NOTICE_STORAGE_KEY = "verandaStaffNotice";
+const DINING_DURATION_MS = 90 * 60 * 1000;
+const DINING_WARNING_MS = 15 * 60 * 1000;
 
 let reservations = [];
 let waitlist = [];
@@ -58,6 +76,10 @@ let activeWalkIns = [];
 let transactions = [];
 
 let currentUser = null;
+let customerView = "home";
+let customerConfirmation = null;
+let customerLookupReservationId = null;
+let customerLookupMessage = "";
 let activeSection = "reservations";
 let flashMsg = null;
 let sortedView = null;
@@ -81,6 +103,554 @@ let currentOrder = {
     tableNumber: null
 };
 
+function reservationReference(reservation) {
+    return reservation.publicId ||
+        `VR-${String(reservation.id).padStart(5, "0")}`;
+}
+
+function diningTimerData(reservation, now = Date.now()) {
+    const checkInTimestamp = Number(reservation.checkInTimestamp);
+
+    if (!Number.isFinite(checkInTimestamp) || checkInTimestamp <= 0) {
+        return null;
+    }
+
+    const endTimestamp = checkInTimestamp + DINING_DURATION_MS;
+    const remainingMs = Math.max(0, endTimestamp - now);
+
+    return {
+        checkInTimestamp: checkInTimestamp,
+        endTimestamp: endTimestamp,
+        remainingMs: remainingMs,
+        remainingSeconds: Math.ceil(remainingMs / 1000),
+        status: remainingMs === 0
+            ? "Time Ended"
+            : remainingMs <= DINING_WARNING_MS
+                ? "Time Warning"
+                : "Dining"
+    };
+}
+
+function formatDiningTime(timestamp) {
+    return new Date(timestamp).toLocaleTimeString(undefined, {
+        hour: "numeric",
+        minute: "2-digit"
+    });
+}
+
+function formatDiningCountdown(totalSeconds) {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    return (
+        String(hours).padStart(2, "0") + ":" +
+        String(minutes).padStart(2, "0") + ":" +
+        String(seconds).padStart(2, "0")
+    );
+}
+
+function loadSharedReservations() {
+    let saved = null;
+
+    try {
+        saved = JSON.parse(
+            localStorage.getItem(RESERVATION_STORAGE_KEY) || "[]"
+        );
+    } catch (error) {
+        saved = [];
+    }
+
+    if (!Array.isArray(saved)) {
+        saved = [];
+    }
+
+    reservations = saved;
+    nextReservationId = 1;
+
+    for (let i = 0; i < reservations.length; i++) {
+        const candidate = Number(reservations[i].id) + 1;
+
+        if (candidate > nextReservationId) {
+            nextReservationId = candidate;
+        }
+    }
+}
+
+function saveSharedReservations() {
+    try {
+        localStorage.setItem(
+            RESERVATION_STORAGE_KEY,
+            JSON.stringify(reservations)
+        );
+    } catch (error) {
+        console.error("Could not save reservations in this browser.", error);
+    }
+}
+
+function storeStaffNotice(text) {
+    try {
+        localStorage.setItem(
+            STAFF_NOTICE_STORAGE_KEY,
+            JSON.stringify({
+                text: text,
+                createdAt: Date.now()
+            })
+        );
+    } catch (error) {
+        console.error("Could not save staff notification.", error);
+    }
+}
+
+function readStaffNotice() {
+    try {
+        const raw = localStorage.getItem(STAFF_NOTICE_STORAGE_KEY);
+
+        if (!raw) {
+            return null;
+        }
+
+        const notice = JSON.parse(raw);
+
+        if (!notice || typeof notice.text !== "string") {
+            return null;
+        }
+
+        return notice;
+    } catch (error) {
+        return null;
+    }
+}
+
+function consumeStaffNotice() {
+    const notice = readStaffNotice();
+
+    if (!notice) {
+        return null;
+    }
+
+    try {
+        localStorage.removeItem(STAFF_NOTICE_STORAGE_KEY);
+    } catch (error) {
+        console.error("Could not clear staff notification.", error);
+    }
+
+    return notice;
+}
+
+function showCustomerHome() {
+    currentUser = null;
+    document.body.classList.add("logged-out");
+    document.body.classList.remove("staff-login-mode");
+    document.getElementById("loginOverlay").style.display = "none";
+    document.getElementById("customerApp").hidden = false;
+    customerView = "home";
+    renderCustomer();
+}
+
+function showStaffLogin() {
+    document.body.classList.add("logged-out", "staff-login-mode");
+    document.getElementById("customerApp").hidden = true;
+    document.getElementById("loginOverlay").style.display = "flex";
+}
+
+function renderCustomer() {
+    const app = document.getElementById("customerApp");
+
+    if (!app || currentUser) {
+        return;
+    }
+
+    app.hidden = false;
+
+    if (customerView === "form") {
+        app.innerHTML = renderCustomerForm();
+    } else if (customerView === "lookup") {
+        app.innerHTML = renderCustomerLookup(
+            findReservationById(customerLookupReservationId),
+            customerLookupMessage
+        );
+    } else if (customerView === "confirmation") {
+        app.innerHTML = renderCustomerConfirmation(customerConfirmation);
+    } else {
+        app.innerHTML = renderCustomerHome();
+    }
+
+    const date = document.getElementById("customer-date");
+
+    if (date) {
+        date.min = today();
+    }x
+}
+
+function customerHeader() {
+    return `
+        <header class="customer-header">
+            <div class="customer-brand">
+                <img
+                    class="customer-brand-logo"
+                    src="295049ea-2cf1-42f9-9b67-5a65c67ebc73-removebg-preview.png"
+                    alt=""
+                >
+                <span>Veranda Resto Garden</span>
+            </div>
+            ${customerView !== "home" ? `
+                <nav class="customer-header-actions" aria-label="Customer menu">
+                    <button class="customer-link" onclick="showCustomerHome()">Home</button>
+                </nav>
+            ` : ""}
+        </header>
+    `;
+}
+
+function customerFooter() {
+    return `
+        <footer class="customer-admin-access customer-site-footer">
+            <address class="customer-location">Veranda Resto Garden, 232 MacArthur Highway Calumpit Central Luzon</address>
+            <div class="customer-site-team">
+                Restaurant team? <button onclick="showStaffLogin()">Staff / Admin Login</button>
+            </div>
+        </footer>
+    `;
+}
+
+function renderCustomerHome() {
+    return `
+        ${customerHeader()}
+        <section class="customer-hero">
+            <div>
+                <h1>Welcome to Veranda Restogarden!</h1>
+                <p>A unique dining experience where delicious flavors meet a tranquil garden setting. Enjoy a menu crafted from locally sourced ingredients.</p>
+                <p>Join us for good food, great company, and unforgettable moments!</p>
+                <div class="customer-actions">
+                    <button class="customer-primary" onclick="showCustomerForm()">Make a Reservation</button>
+                    <button class="customer-secondary" onclick="showCustomerLookup()">View My Reservation</button>
+                </div>
+            </div>
+        </section>
+        ${customerFooter()}
+    `;
+}
+
+function renderCustomerForm() {
+    return `
+        ${customerHeader()}
+        <section class="customer-panel">
+            <h1>Make a Reservation</h1>
+            <p>Send a booking request to Veranda Resto Garden. Reservations are pending until confirmed by our team.</p>
+            <form onsubmit="submitCustomerReservation(event)">
+                <div class="customer-form-grid">
+                    <div class="customer-field">
+                        <label for="customer-name">Customer Name</label>
+                        <input id="customer-name" name="name" autocomplete="name" required>
+                    </div>
+                    <div class="customer-field">
+                        <label for="customer-contact">Contact Number</label>
+                        <input id="customer-contact" name="contact" type="tel" autocomplete="tel" required>
+                    </div>
+                    <div class="customer-field">
+                        <label for="customer-date">Reservation Date</label>
+                        <input id="customer-date" name="date" type="date" min="${today()}" required>
+                    </div>
+                    <div class="customer-field">
+                        <label for="customer-time">Reservation Time</label>
+                        <input id="customer-time" name="time" type="time" required>
+                    </div>
+                    <div class="customer-field">
+                        <label for="customer-adults">Number of Adults</label>
+                        <input id="customer-adults" name="adult" type="number" min="0" value="1" required>
+                    </div>
+                    <div class="customer-field">
+                        <label for="customer-kids">Number of Kids</label>
+                        <input id="customer-kids" name="kid" type="number" min="0" value="0" required>
+                    </div>
+                    <div class="customer-field">
+                        <label for="customer-seniors">Number of Seniors</label>
+                        <input id="customer-seniors" name="senior" type="number" min="0" value="0" required>
+                    </div>
+                    <div class="customer-field full">
+                        <label for="customer-request">Special Request (optional)</label>
+                        <textarea id="customer-request" name="specialRequest" maxlength="500"></textarea>
+                    </div>
+                </div>
+                <div id="customer-form-error" class="customer-error" role="alert"></div>
+                <div class="customer-form-actions">
+                    <button class="customer-primary" type="submit">Submit Reservation</button>
+                    <button class="customer-secondary" type="button" onclick="showCustomerHome()">Back</button>
+                </div>
+            </form>
+        </section>
+        ${customerFooter()}
+    `;
+}
+
+function showCustomerForm() {
+    customerView = "form";
+    customerConfirmation = null;
+    renderCustomer();
+}
+
+function showCustomerLookup() {
+    customerView = "lookup";
+    customerConfirmation = null;
+    customerLookupReservationId = null;
+    customerLookupMessage = "";
+    renderCustomer();
+}
+
+function findReservationById(id) {
+    if (id === null || id === undefined) {
+        return null;
+    }
+
+    for (let i = 0; i < reservations.length; i++) {
+        if (reservations[i].id === id) {
+            return reservations[i];
+        }
+    }
+
+    return null;
+}
+
+function submitCustomerReservation(event) {
+    event.preventDefault();
+
+    loadSharedReservations();
+
+    const name = document.getElementById("customer-name").value.trim();
+    const contact = document.getElementById("customer-contact").value.trim();
+    const date = document.getElementById("customer-date").value;
+    const time = document.getElementById("customer-time").value;
+    const adult = Math.max(0, Number(document.getElementById("customer-adults").value) || 0);
+    const kid = Math.max(0, Number(document.getElementById("customer-kids").value) || 0);
+    const senior = Math.max(0, Number(document.getElementById("customer-seniors").value) || 0);
+    const guests = adult + kid + senior;
+    const error = document.getElementById("customer-form-error");
+
+    if (!name || !contact || !date || !time) {
+        error.textContent = "Complete the required fields to continue.";
+        return;
+    }
+
+    if (!validReservationDate(date, time)) {
+        error.textContent = "Choose a date and time that has not passed.";
+        return;
+    }
+
+    if (guests < 1) {
+        error.textContent = "Enter at least one guest.";
+        return;
+    }
+
+    const reservation = {
+        id: nextReservationId++,
+        publicId: "",
+        name: name,
+        contact: contact,
+        date: date,
+        time: time,
+        guests: guests,
+        adult: adult,
+        kid: kid,
+        senior: senior,
+        specialRequest: document.getElementById("customer-request").value.trim(),
+        tableNumber: null,
+        status: "pending",
+        checkInTime: null
+    };
+
+    reservation.publicId = reservationReference(reservation);
+    reservations[reservations.length] = reservation;
+    saveSharedReservations();
+    storeStaffNotice(
+        `New reservation received: ${reservationReference(reservation)} for ${reservation.name} (${reservation.guests} guests) on ${reservation.date} at ${reservation.time}.`
+    );
+
+    customerConfirmation = reservation;
+    customerView = "confirmation";
+    renderCustomer();
+}
+
+function renderCustomerLookup(result = null, message = "") {
+    let resultMarkup = "";
+
+    if (message) {
+        resultMarkup = `<p class="customer-error" role="alert">${message}</p>`;
+    } else if (result) {
+        resultMarkup = customerReservationSummary(result);
+    }
+
+    return `
+        ${customerHeader()}
+        <section class="customer-panel">
+            <h1>View My Reservation</h1>
+            <p>Enter your reservation ID, name, and contact number to view its current status.</p>
+            <form onsubmit="lookupCustomerReservation(event)">
+                <div class="customer-form-grid">
+                    <div class="customer-field">
+                        <label for="lookup-reference">Reservation ID</label>
+                        <input id="lookup-reference" required placeholder="VR-00000">
+                    </div>
+                    <div class="customer-field">
+                        <label for="lookup-name">Customer Name</label>
+                        <input id="lookup-name" autocomplete="name" required>
+                    </div>
+                    <div class="customer-field">
+                        <label for="lookup-contact">Contact Number</label>
+                        <input id="lookup-contact" type="tel" autocomplete="tel" required>
+                    </div>
+                </div>
+                <div class="customer-form-actions">
+                    <button class="customer-primary" type="submit">View Reservation</button>
+                    <button class="customer-secondary" type="button" onclick="showCustomerHome()">Back</button>
+                </div>
+            </form>
+            ${resultMarkup}
+        </section>
+        ${customerFooter()}
+    `;
+}
+
+function customerReservationSummary(reservation) {
+    const timer = diningTimerData(reservation);
+    const statusLabels = {
+        pending: "Pending Approval",
+        confirmed: "Confirmed",
+        arrived: "Checked In",
+        cancelled: "Cancelled"
+    };
+    const reservationStatus = statusLabels[reservation.status] || reservation.status;
+    const diningClass = timer && timer.status === "Time Ended"
+        ? "ended"
+        : timer && timer.status === "Time Warning"
+            ? "warning"
+            : "";
+    const reservationDate = new Date(`${reservation.date}T00:00:00`);
+    const formattedDate = Number.isNaN(reservationDate.getTime())
+        ? reservation.date
+        : reservationDate.toLocaleDateString("en-US", {
+            month: "long",
+            day: "numeric",
+            year: "numeric"
+        });
+    const reservationTime = new Date(`1970-01-01T${reservation.time}`);
+    const formattedTime = Number.isNaN(reservationTime.getTime())
+        ? reservation.time
+        : reservationTime.toLocaleTimeString("en-US", {
+            hour: "numeric",
+            minute: "2-digit"
+        });
+
+    return `
+        <div class="reservation-confirmation">
+            <h2>Reservation Details</h2>
+            <dl class="reservation-detail-list">
+                <div><dt>Reservation ID</dt><dd>${escapeHtml(reservationReference(reservation))}</dd></div>
+                <div><dt>Name</dt><dd>${escapeHtml(reservation.name)}</dd></div>
+                <div><dt>Contact</dt><dd>${escapeHtml(reservation.contact || "")}</dd></div>
+                <div><dt>Date</dt><dd>${escapeHtml(formattedDate)}</dd></div>
+                <div><dt>Time</dt><dd>${escapeHtml(formattedTime)}</dd></div>
+                <div><dt>Adults</dt><dd>${Number(reservation.adult) || 0}</dd></div>
+                <div><dt>Kids</dt><dd>${Number(reservation.kid) || 0}</dd></div>
+                <div><dt>Seniors</dt><dd>${Number(reservation.senior) || 0}</dd></div>
+                <div><dt>Total Guests</dt><dd>${Number(reservation.guests) || 0}</dd></div>
+                <div><dt>Table</dt><dd>${reservation.tableNumber ? `Table ${escapeHtml(reservation.tableNumber)}` : "Pending"}</dd></div>
+                <div><dt>Status</dt><dd>${escapeHtml(reservationStatus)}</dd></div>
+            </dl>
+            ${timer ? `
+                <p><b>Dining Status:</b> <span class="customer-dining-status ${diningClass}" data-customer-dining-status="${reservation.id}">${timer.status}</span></p>
+                <p><b>Checked In:</b> ${escapeHtml(formatDiningTime(timer.checkInTimestamp))}</p>
+                <p><b>End Time:</b> ${escapeHtml(formatDiningTime(timer.endTimestamp))}</p>
+                <p><b>Time Remaining:</b> <span data-customer-dining-time="${reservation.id}">${formatDiningCountdown(timer.remainingSeconds)}</span></p>
+            ` : ""}
+            ${reservation.status !== "cancelled" ? `
+                <div class="customer-form-actions">
+                    <button class="customer-primary customer-cancel-reservation" onclick="cancelCustomerReservation(${Number(reservation.id)})">Cancel Reservation</button>
+                </div>
+            ` : ""}
+        </div>
+    `;
+}
+
+function renderCustomerConfirmation(reservation) {
+    return `
+        ${customerHeader()}
+        <section class="customer-panel">
+            <h1>Reservation Request Received</h1>
+            <p>Please keep your Reservation ID. Your request is pending until the restaurant confirms it.</p>
+            ${customerReservationSummary(reservation)}
+            <div class="customer-form-actions">
+                <button class="customer-primary" onclick="showCustomerLookup()">View My Reservation</button>
+                <button class="customer-secondary" onclick="showCustomerHome()">Return Home</button>
+            </div>
+        </section>
+        ${customerFooter()}
+    `;
+}
+
+function lookupCustomerReservation(event) {
+    event.preventDefault();
+    const reference = document.getElementById("lookup-reference").value.trim().toUpperCase();
+    const name = document.getElementById("lookup-name").value.trim().toLowerCase();
+    const contact = document.getElementById("lookup-contact").value.trim();
+    let found = null;
+    loadSharedReservations();
+
+    for (let i = 0; i < reservations.length; i++) {
+        if (
+            reservationReference(reservations[i]).toUpperCase() === reference &&
+            String(reservations[i].name || "").trim().toLowerCase() === name &&
+            String(reservations[i].contact || "").trim() === contact
+        ) {
+            found = reservations[i];
+            break;
+        }
+    }
+
+    customerView = "lookup";
+    customerLookupReservationId = found ? found.id : null;
+    customerLookupMessage = found
+        ? ""
+        : "We could not find a reservation matching those details.";
+    renderCustomer();
+}
+
+function cancelCustomerReservation(id) {
+    loadSharedReservations();
+    const reservation = findReservationById(id);
+
+    if (!reservation || reservation.status === "cancelled") {
+        return;
+    }
+
+    if (!confirm(`Cancel the reservation for ${reservation.name}?`)) {
+        return;
+    }
+
+    if (reservation.tableNumber) {
+        for (let i = 0; i < tables.length; i++) {
+            if (tables[i].number === reservation.tableNumber) {
+                tables[i].status = "available";
+            }
+        }
+    }
+
+    reservation.status = "cancelled";
+    saveSharedReservations();
+    customerLookupReservationId = reservation.id;
+    customerLookupMessage = "";
+    renderCustomer();
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
 const NAV = [
     {
         group: "Reservations",
@@ -97,18 +667,17 @@ const NAV = [
             ["tableAvailability", "Table Availability"],
             ["assignTable", "Assign a Table"],
             ["waitlist", "Walk-in Waiting List"],
-            ["checkIn", "Check-In"]
+            ["checkIn", "Check-In"],
+            ["diningMonitor", "Dining Monitor"]
         ]
     },
     {
         group: "Orders & Billing",
         items: [
-            ["buffetPackages", "Buffet Packages"],
             ["guestCount", "Guest Count"],
             ["billSummary", "Bill Summary"],
             ["discounts", "Discounts"],
-            ["payment", "Payment"],
-            ["receipts", "Receipts"]
+            ["payment", "Payment"]
         ]
     },
     {
@@ -163,6 +732,15 @@ function login() {
     currentUser = user;
     activeSection = "reservations";
 
+    const pendingNotice = consumeStaffNotice();
+
+    if (pendingNotice) {
+        setFlash(pendingNotice.text);
+    }
+
+    document.getElementById("customerApp").hidden = true;
+    document.body.classList.remove("staff-login-mode");
+
     document.body.classList.remove("logged-out");
 
     document.getElementById("loginOverlay")
@@ -178,7 +756,8 @@ function login() {
 function logout() {
     currentUser = null;
 
-    document.body.classList.add("logged-out");
+    document.body.classList.add("logged-out", "staff-login-mode");
+    document.getElementById("customerApp").hidden = true;
 
     document.getElementById("loginOverlay")
         .style.display = "flex";
@@ -291,20 +870,33 @@ function setFlash(text, type = "ok") {
     };
 }
 
+let flashTimer = null;
+
 function flash() {
     if (!flashMsg) {
         return "";
     }
 
-    const message = `
-        <div class="flash ${flashMsg.type === "err" ? "err" : ""}">
-            ${flashMsg.text}
-        </div>
-    `;
+    const toastHost = document.getElementById("toastContainer");
+
+    if (toastHost) {
+        if (flashTimer) {
+            clearTimeout(flashTimer);
+        }
+
+        toastHost.innerHTML = `
+            <div class="toast ${flashMsg.type === "err" ? "err" : "ok"}">
+                ${flashMsg.text}
+            </div>
+        `;
+
+        flashTimer = setTimeout(() => {
+            toastHost.innerHTML = "";
+        }, 4000);
+    }
 
     flashMsg = null;
-
-    return message;
+    return "";
 }
 
 /* DATE */
@@ -361,7 +953,173 @@ function tick() {
         });
 }
 
+function findDiningRecord(type, id) {
+    const records = type === "walkin"
+        ? activeWalkIns
+        : reservations;
+
+    for (let i = 0; i < records.length; i++) {
+        if (records[i].id === id) {
+            return records[i];
+        }
+    }
+
+    return null;
+}
+
+function renderDiningMonitorCard(record, type, now) {
+    const isActive = type === "walkin"
+        ? record.status === "seated"
+        : record.status === "arrived";
+
+    if (!isActive) {
+        return "";
+    }
+
+    const timer = diningTimerData(record, now);
+
+    if (!timer) {
+        return "";
+    }
+
+    const stageClass = timer.status === "Time Ended"
+        ? "ended"
+        : timer.status === "Time Warning"
+            ? "warning"
+            : "normal";
+    const key = `${type}-${record.id}`;
+
+    return `
+        <article class="dining-monitor-card ${stageClass}" data-dining-type="${type}" data-dining-id="${record.id}">
+            <div class="dining-monitor-customer">
+                <strong>${escapeHtml(record.name)}</strong>
+                <span>Table ${escapeHtml(record.tableNumber)}</span>
+            </div>
+            <div class="dining-monitor-times">
+                <span>Checked In: ${escapeHtml(formatDiningTime(timer.checkInTimestamp))}</span>
+                <span>End Time: ${escapeHtml(formatDiningTime(timer.endTimestamp))}</span>
+            </div>
+            <p>Dining Status: <b data-dining-status="${key}">${timer.status}</b></p>
+            <p>Time Remaining: <strong class="dining-countdown" data-dining-countdown="${key}">${formatDiningCountdown(timer.remainingSeconds)}</strong></p>
+            <div class="dining-notice" data-dining-notice="${key}" aria-live="polite"></div>
+        </article>
+    `;
+}
+
+function renderDiningMonitor() {
+    let cards = "";
+    const now = Date.now();
+
+    for (let i = 0; i < reservations.length; i++) {
+        cards += renderDiningMonitorCard(reservations[i], "reservation", now);
+    }
+
+    for (let i = 0; i < activeWalkIns.length; i++) {
+        cards += renderDiningMonitorCard(activeWalkIns[i], "walkin", now);
+    }
+
+    return `
+        <section id="dining-monitor" class="dining-monitor" aria-label="Dining time monitor">
+            <h2>Dining Monitor</h2>
+            ${cards
+                ? `<div class="dining-monitor-list">${cards}</div>`
+                : "<p>No guests are currently checked in.</p>"}
+        </section>
+    `;
+}
+
+function updateDiningTimers() {
+    const now = Date.now();
+    const cards = currentUser
+        ? document.querySelectorAll("[data-dining-id]")
+        : [];
+
+    for (let i = 0; i < cards.length; i++) {
+        const id = Number(cards[i].getAttribute("data-dining-id"));
+        const type = cards[i].getAttribute("data-dining-type");
+        const record = findDiningRecord(type, id);
+
+        if (!record) {
+            continue;
+        }
+
+        const timer = diningTimerData(record, now);
+
+        if (!timer) {
+            continue;
+        }
+
+        const stageClass = timer.status === "Time Ended"
+            ? "ended"
+            : timer.status === "Time Warning"
+                ? "warning"
+                : "normal";
+        cards[i].className = `dining-monitor-card ${stageClass}`;
+
+        const key = `${type}-${id}`;
+        const status = document.querySelector(`[data-dining-status="${key}"]`);
+        const countdown = document.querySelector(`[data-dining-countdown="${key}"]`);
+        const notice = document.querySelector(`[data-dining-notice="${key}"]`);
+
+        if (status) {
+            status.textContent = timer.status;
+        }
+
+        if (countdown) {
+            countdown.textContent = formatDiningCountdown(timer.remainingSeconds);
+        }
+
+        if (notice) {
+            const noticeText = timer.status === "Time Ended"
+                ? `DINING TIME ENDED | Customer: ${record.name} | Table: ${record.tableNumber} | Check In: ${formatDiningTime(timer.checkInTimestamp)} | Dining Time: 1 hour 30 minutes`
+                : timer.status === "Time Warning"
+                    ? `DINING TIME WARNING | ${record.name} at Table ${record.tableNumber} has 15 minutes or less remaining.`
+                    : "";
+            notice.className = timer.status === "Time Ended"
+                ? "dining-notice ended"
+                : timer.status === "Time Warning"
+                    ? "dining-notice warning"
+                    : "dining-notice";
+
+            if (notice.textContent !== noticeText) {
+                notice.textContent = noticeText;
+            }
+        }
+    }
+
+    if (customerView === "lookup" && !currentUser) {
+        const customerStatus = document.querySelectorAll("[data-customer-dining-status]");
+        const customerCountdowns = document.querySelectorAll("[data-customer-dining-time]");
+
+        for (let i = 0; i < customerStatus.length; i++) {
+            const id = Number(customerStatus[i].getAttribute("data-customer-dining-status"));
+            const reservation = findReservationById(id);
+            const timer = reservation ? diningTimerData(reservation, now) : null;
+
+            if (timer) {
+                customerStatus[i].textContent = timer.status;
+                customerStatus[i].className = timer.status === "Time Ended"
+                    ? "customer-dining-status ended"
+                    : timer.status === "Time Warning"
+                        ? "customer-dining-status warning"
+                        : "customer-dining-status";
+            }
+        }
+
+        for (let i = 0; i < customerCountdowns.length; i++) {
+            const id = Number(customerCountdowns[i].getAttribute("data-customer-dining-time"));
+            const reservation = findReservationById(id);
+            const timer = reservation ? diningTimerData(reservation, now) : null;
+
+            if (timer) {
+                customerCountdowns[i].textContent = formatDiningCountdown(timer.remainingSeconds);
+            }
+        }
+    }
+}
+
 setInterval(tick, 30000);
+setInterval(updateDiningTimers, 1000);
 
 /* DASHBOARD STATS */
 
@@ -411,139 +1169,12 @@ function availableTableCount() {
     let count = 0;
 
     for (let i = 0; i < tables.length; i++) {
-        if (tableAvailableSeats(tables[i]) > 0) {
+        if (tables[i].status === "available") {
             count++;
         }
     }
 
     return count;
-}
-
-function tableAllocations(table) {
-    if (!Array.isArray(table.allocations)) {
-        table.allocations = [];
-    }
-
-    return table.allocations;
-}
-
-function tableUsedSeats(table) {
-    const allocations = tableAllocations(table);
-    let used = 0;
-
-    for (let i = 0; i < allocations.length; i++) {
-        used += allocations[i].seats;
-    }
-
-    return used;
-}
-
-function tableAvailableSeats(table) {
-    const freeSeats = Math.max(0, table.seats - tableUsedSeats(table));
-
-    if (freeSeats === table.seats) {
-        return freeSeats;
-    }
-
-    return Math.floor(freeSeats / 2) * 2;
-}
-
-function seatsRequiredForParty(table, guests) {
-    if (guests >= table.seats) {
-        return table.seats;
-    }
-
-    return Math.ceil(guests / 2) * 2;
-}
-
-function updateTableStatus(table) {
-    const used = tableUsedSeats(table);
-
-    if (used === 0) {
-        table.status = "available";
-        return;
-    }
-
-    const allocations = tableAllocations(table);
-    let occupied = false;
-
-    for (let i = 0; i < allocations.length; i++) {
-        if (allocations[i].status === "occupied") {
-            occupied = true;
-            break;
-        }
-    }
-
-    if (tableAvailableSeats(table) > 0) {
-        table.status = occupied
-            ? "partially occupied"
-            : "partially reserved";
-    } else {
-        table.status = occupied ? "occupied" : "reserved";
-    }
-}
-
-function allocateTableSeats(table, type, id, seats, status) {
-    const allocations = tableAllocations(table);
-
-    allocations[allocations.length] = {
-        type: type,
-        id: id,
-        seats: seats,
-        status: status
-    };
-
-    updateTableStatus(table);
-}
-
-function updateTableAllocationStatus(tableNumber, type, id, status) {
-    for (let i = 0; i < tables.length; i++) {
-        const table = tables[i];
-
-        if (Number(table.number) !== Number(tableNumber)) {
-            continue;
-        }
-
-        const allocations = tableAllocations(table);
-
-        for (let j = 0; j < allocations.length; j++) {
-            if (
-                allocations[j].type === type &&
-                allocations[j].id === id
-            ) {
-                allocations[j].status = status;
-                updateTableStatus(table);
-                return;
-            }
-        }
-    }
-}
-
-function releaseTableSeats(tableNumber, type, id) {
-    for (let i = 0; i < tables.length; i++) {
-        const table = tables[i];
-
-        if (Number(table.number) !== Number(tableNumber)) {
-            continue;
-        }
-
-        const allocations = tableAllocations(table);
-        const remainingAllocations = [];
-
-        for (let j = 0; j < allocations.length; j++) {
-            if (
-                allocations[j].type !== type ||
-                allocations[j].id !== id
-            ) {
-                remainingAllocations[remainingAllocations.length] =
-                    allocations[j];
-            }
-        }
-
-        table.allocations = remainingAllocations;
-        updateTableStatus(table);
-        return;
-    }
 }
 
 
@@ -553,11 +1184,7 @@ function renderNav() {
 
     for (let g = 0; g < NAV.length; g++) {
         const items = NAV[g].items;
-
-        html += `
-            <div class="navgroup">
-                <h4>${NAV[g].group}</h4>
-        `;
+        let groupItemsHtml = "";
 
         for (let i = 0; i < items.length; i++) {
             if (
@@ -567,7 +1194,7 @@ function renderNav() {
                 continue;
             }
 
-            html += `
+            groupItemsHtml += `
                 <button
                     class="navitem ${
                         activeSection === items[i][0]
@@ -581,7 +1208,14 @@ function renderNav() {
             `;
         }
 
-        html += "</div>";
+        if (groupItemsHtml) {
+            html += `
+                <div class="navgroup">
+                    <h4>${NAV[g].group}</h4>
+                    ${groupItemsHtml}
+                </div>
+            `;
+        }
     }
 
     document.getElementById("rail").innerHTML = html;
@@ -618,16 +1252,16 @@ function reservationsTable(list, actions = false) {
         rows += `
             <tr>
                 <td>
-                    RES-${String(r.id).padStart(3, "0")}
+                    ${reservationReference(r)}
                 </td>
 
-                <td>${r.name}</td>
+                <td>${escapeHtml(r.name)}</td>
 
-                <td>${r.contact || "—"}</td>
+                <td>${escapeHtml(r.contact || "—")}</td>
 
-                <td>${r.date}</td>
+                <td>${escapeHtml(r.date)}</td>
 
-                <td>${r.time}</td>
+                <td>${escapeHtml(r.time)}</td>
 
                 <td>${r.adult}</td>
 
@@ -639,6 +1273,8 @@ function reservationsTable(list, actions = false) {
                     <b>${r.guests}</b>
                 </td>
 
+                <td>${escapeHtml(r.specialRequest || "—")}</td>
+
                 <td>
                     ${r.tableNumber
                         ? "#" + r.tableNumber
@@ -647,13 +1283,13 @@ function reservationsTable(list, actions = false) {
 
                 <td>
                     <span class="pill ${r.status}">
-                        ${r.status}
+                        ${escapeHtml(r.status)}
                     </span>
 
                     ${
                         r.checkInTime
                             ? `<div class="hint">
-                                ${r.checkInTime}
+                                ${escapeHtml(r.checkInTime)}
                                </div>`
                             : ""
                     }
@@ -661,7 +1297,11 @@ function reservationsTable(list, actions = false) {
 
                 ${
                     actions
-                        ? ""
+                        ? `<td>
+                            ${r.status === "pending"
+                                ? `<button class="btn confirm small" onclick="confirmReservation(${r.id})">Confirm</button>`
+                                : "—"}
+                           </td>`
                         : ""
                 }
             </tr>
@@ -681,8 +1321,10 @@ function reservationsTable(list, actions = false) {
                     <th>Kid</th>
                     <th>Senior</th>
                     <th>Total</th>
+                    <th>Special Request</th>
                     <th>Table</th>
                     <th>Status</th>
+                    ${actions ? "<th>Action</th>" : ""}
                 </tr>
             </thead>
 
@@ -809,17 +1451,31 @@ function renderReservations() {
                 Save reservation
             </button>
         </div>
-
-        <div class="card">
-            <b>All reservations</b>
-
-            <p class="hint">
-                ${reservations.length} on the books.
-            </p>
-
-            ${reservationsTable(reservations)}
-        </div>
     `;
+}
+
+function confirmReservation(id) {
+    loadSharedReservations();
+
+    for (let i = 0; i < reservations.length; i++) {
+        if (reservations[i].id === id) {
+            if (reservations[i].status !== "pending") {
+                setFlash("Only pending reservations can be confirmed.", "err");
+                render();
+                return;
+            }
+
+            reservations[i].status = "confirmed";
+            reservations[i].confirmedAt = new Date().toLocaleString();
+            saveSharedReservations();
+            setFlash(`Reservation ${reservationReference(reservations[i])} confirmed.`);
+            render();
+            return;
+        }
+    }
+
+    setFlash("Reservation was not found. Refresh and try again.", "err");
+    render();
 }
 
 function updateReservationTotal() {
@@ -836,37 +1492,22 @@ function updateReservationTotal() {
         adult + kid + senior;
 }
 
-function conflict(tableNumber, date, time, ignore, guests) {
-    let reservedSeats = 0;
-    let table = null;
-
-    for (let i = 0; i < tables.length; i++) {
-        if (Number(tables[i].number) === Number(tableNumber)) {
-            table = tables[i];
-            break;
-        }
-    }
-
-    if (!table) {
-        return true;
-    }
-
+function conflict(tableNumber, date, time, ignore) {
     for (let i = 0; i < reservations.length; i++) {
         const r = reservations[i];
 
         if (
             r.id !== ignore &&
             r.status !== "cancelled" &&
-            r.status !== "completed" &&
-            Number(r.tableNumber) === Number(table) &&
+            Number(r.tableNumber) === Number(tableNumber) &&
             r.date === date &&
             r.time === time
         ) {
-            reservedSeats += seatsRequiredForParty(table, r.guests);
+            return true;
         }
     }
 
-    return reservedSeats + seatsRequiredForParty(table, guests) > table.seats;
+    return false;
 }
 
 function addReservation() {
@@ -939,6 +1580,7 @@ function addReservation() {
 
     reservations[reservations.length] = {
         id: nextReservationId++,
+        publicId: null,
         name: name,
         contact: contact,
         date: date,
@@ -951,6 +1593,10 @@ function addReservation() {
         status: "pending",
         checkInTime: null
     };
+
+    reservations[reservations.length - 1].publicId =
+        reservationReference(reservations[reservations.length - 1]);
+    saveSharedReservations();
 
     setFlash(
         `Reservation saved for ${name}.`
@@ -996,6 +1642,16 @@ function renderFindReservation() {
 
             <div id="rs-result"></div>
         </div>
+
+        <div class="card">
+            <b>All reservations</b>
+
+            <p class="hint">
+                ${reservations.length} on the books.
+            </p>
+
+            ${reservationsTable(reservations, true)}
+        </div>
     `;
 }
 
@@ -1012,15 +1668,14 @@ function searchReservation() {
         const r = reservations[i];
 
         const id = String(r.id);
-
-        const full =
-            "res-" +
-            String(r.id).padStart(3, "0");
+        const publicId = reservationReference(r).toLowerCase();
+        const legacyId = "res-" + String(r.id).padStart(3, "0");
 
         if (
             id === q ||
             id.padStart(3, "0") === q ||
-            full === q ||
+            publicId.toLowerCase() === q ||
+            legacyId === q ||
             r.name.toLowerCase().includes(q)
         ) {
             found = r;
@@ -1044,7 +1699,10 @@ function renderCancelReservation() {
     let list = [];
 
     for (let i = 0; i < reservations.length; i++) {
-        if (reservations[i].status === "pending") {
+        if (
+            reservations[i].status === "pending" ||
+            reservations[i].status === "confirmed"
+        ) {
             list[list.length] = reservations[i];
         }
     }
@@ -1054,7 +1712,7 @@ function renderCancelReservation() {
             <div class="card">
                 ${head(
                     "Cancel a Reservation",
-                    "There are no pending reservations to cancel."
+                    "There are no active reservations to cancel."
                 )}
 
                 ${flash()}
@@ -1071,7 +1729,7 @@ function renderCancelReservation() {
     for (let i = 0; i < list.length; i++) {
         options += `
             <option value="${list[i].id}">
-                RES-${String(list[i].id).padStart(3, "0")}
+                ${reservationReference(list[i])}
                 — ${list[i].name}
                 — ${list[i].date} ${list[i].time}
             </option>
@@ -1137,13 +1795,15 @@ function filterCancelReservations() {
     let list = [];
 
     for (let i = 0; i < reservations.length; i++) {
-        if (reservations[i].status !== "pending") {
+        if (
+            reservations[i].status !== "pending" &&
+            reservations[i].status !== "confirmed"
+        ) {
             continue;
         }
 
         const term = (
-            "res-" +
-            String(reservations[i].id).padStart(3, "0") +
+            reservationReference(reservations[i]) +
             " " +
             reservations[i].name +
             " " +
@@ -1170,7 +1830,7 @@ function filterCancelReservations() {
     for (let i = 0; i < list.length; i++) {
         options += `
             <option value="${list[i].id}">
-                RES-${String(list[i].id).padStart(3, "0")}
+                ${reservationReference(list[i])}
                 — ${list[i].name}
                 — ${list[i].date} ${list[i].time}
             </option>
@@ -1207,18 +1867,15 @@ function cancelReservationById(id) {
     }
 
     if (r.tableNumber) {
-        releaseTableSeats(r.tableNumber, "reservation", r.id);
+        for (let i = 0; i < tables.length; i++) {
+            if (tables[i].number === r.tableNumber) {
+                tables[i].status = "available";
+            }
+        }
     }
 
-    for (
-        let i = index;
-        i < reservations.length - 1;
-        i++
-    ) {
-        reservations[i] = reservations[i + 1];
-    }
-
-    reservations.length--;
+    r.status = "cancelled";
+    saveSharedReservations();
 
     setFlash(
         `Reservation for ${r.name} was cancelled.`
@@ -1346,17 +2003,16 @@ function renderTableAvailability() {
 
     for (let i = 0; i < tables.length; i++) {
         const t = tables[i];
-        const freeSeats = tableAvailableSeats(t);
 
         total++;
 
-        if (freeSeats === 0 && tableUsedSeats(t) > 0) {
+        if (t.status === "occupied") {
             occupied++;
-        } else if (freeSeats === 0) {
+        } else if (t.status === "reserved") {
             reserved++;
         } else {
             available++;
-            seats += freeSeats;
+            seats += t.seats;
         }
     }
 
@@ -1364,7 +2020,6 @@ function renderTableAvailability() {
 
     for (let i = 0; i < tables.length; i++) {
         const t = tables[i];
-        const freeSeats = tableAvailableSeats(t);
         let r = null;
 
         for (let j = 0; j < reservations.length; j++) {
@@ -1385,8 +2040,8 @@ function renderTableAvailability() {
         rows += `
             <tr>
                 <td>Table ${t.number}</td>
-                <td>${t.seats} (${freeSeats} free)</td>
-                <td>${tableStatusLabel(t)}</td>
+                <td>${t.seats}</td>
+                <td>${t.status}</td>
                 <td>${r ? r.date : "—"}</td>
                 <td>${r ? r.time : "—"}</td>
             </tr>
@@ -1447,23 +2102,6 @@ function renderTableAvailability() {
     `;
 }
 
-function tableStatusLabel(table) {
-    const used = tableUsedSeats(table);
-    const free = tableAvailableSeats(table);
-
-    if (used === 0) {
-        return "Available";
-    }
-
-    if (free === 0) {
-        return table.status === "reserved"
-            ? "Reserved"
-            : "Occupied";
-    }
-
-    return `${table.seats - free}/${table.seats} used, ${free} free`;
-}
-
 
 
 function renderAssignTable() {
@@ -1471,7 +2109,8 @@ function renderAssignTable() {
 
     for (let i = 0; i < reservations.length; i++) {
         if (
-            reservations[i].status === "pending" &&
+            (reservations[i].status === "pending" ||
+                reservations[i].status === "confirmed") &&
             !reservations[i].tableNumber
         ) {
             pending[pending.length] = reservations[i];
@@ -1483,7 +2122,7 @@ function renderAssignTable() {
             <div class="card">
                 ${head(
                     "Assign a Table",
-                    "Assign available movable table capacity to the party."
+                        "Assign the first available table that fits the party."
                 )}
 
                 ${flash()}
@@ -1510,7 +2149,7 @@ function renderAssignTable() {
         <div class="card">
             ${head(
                 "Assign a Table",
-                "Find the first table with enough movable seats."
+                "Find the first available table with enough seats."
             )}
 
             ${flash()}
@@ -1564,28 +2203,23 @@ function assignTable() {
         const t = tables[i];
 
         if (
-            tableAvailableSeats(t) >= seatsRequiredForParty(t, res.guests)
+            t.status === "available" &&
+            t.seats >= res.guests
         ) {
             if (
                 conflict(
                     t.number,
                     res.date,
                     res.time,
-                    res.id,
-                    res.guests
+                    res.id
                 )
             ) {
                 continue;
             }
 
-            allocateTableSeats(
-                t,
-                "reservation",
-                res.id,
-                seatsRequiredForParty(t, res.guests),
-                "reserved"
-            );
+            t.status = "reserved";
             res.tableNumber = t.number;
+            saveSharedReservations();
 
             setFlash(
                 `Table ${t.number} assigned to ${res.name}.`
@@ -1785,8 +2419,8 @@ function addWalkIn() {
 
     for (let i = 0; i < tables.length; i++) {
         if (
-            tableAvailableSeats(tables[i]) >=
-                seatsRequiredForParty(tables[i], size)
+            size <= tables[i].seats &&
+            tables[i].status === "available"
         ) {
             chosen = tables[i];
             break;
@@ -1802,21 +2436,16 @@ function addWalkIn() {
         size: size,
         status: "waiting",
         tableNumber: null,
-        checkInTime: null
+        checkInTime: null,
+        checkInTimestamp: null
     };
 
     if (chosen) {
+        chosen.status = "occupied";
         w.status = "seated";
         w.tableNumber = chosen.number;
-        w.checkInTime =
-            new Date().toLocaleString();
-        allocateTableSeats(
-            chosen,
-            "walkin",
-            w.id,
-            seatsRequiredForParty(chosen, w.size),
-            "occupied"
-        );
+        w.checkInTimestamp = Date.now();
+        w.checkInTime = new Date(w.checkInTimestamp).toLocaleString();
 
         activeWalkIns[
             activeWalkIns.length
@@ -1854,8 +2483,8 @@ function serveNextWalkIn() {
 
     for (let i = 0; i < tables.length; i++) {
         if (
-            tableAvailableSeats(tables[i]) >=
-                seatsRequiredForParty(tables[i], w.size)
+            w.size <= tables[i].seats &&
+            tables[i].status === "available"
         ) {
             chosen = tables[i];
             break;
@@ -1882,17 +2511,11 @@ function serveNextWalkIn() {
 
     waitlist.length--;
 
+    chosen.status = "occupied";
     w.status = "seated";
     w.tableNumber = chosen.number;
-    w.checkInTime =
-        new Date().toLocaleString();
-    allocateTableSeats(
-        chosen,
-        "walkin",
-        w.id,
-        seatsRequiredForParty(chosen, w.size),
-        "occupied"
-    );
+    w.checkInTimestamp = Date.now();
+    w.checkInTime = new Date(w.checkInTimestamp).toLocaleString();
 
     activeWalkIns[
         activeWalkIns.length
@@ -1912,7 +2535,8 @@ function renderCheckIn() {
 
     for (let i = 0; i < reservations.length; i++) {
         if (
-            reservations[i].status === "pending" &&
+            (reservations[i].status === "pending" ||
+                reservations[i].status === "confirmed") &&
             reservations[i].tableNumber
         ) {
             list[list.length] = reservations[i];
@@ -2023,14 +2647,15 @@ function checkInGuest(id) {
 
     r.checkInTime =
         now.toLocaleString();
+    r.checkInTimestamp = now.getTime();
+    saveSharedReservations();
 
     if (r.tableNumber) {
-        updateTableAllocationStatus(
-            r.tableNumber,
-            "reservation",
-            r.id,
-            "occupied"
-        );
+        for (let i = 0; i < tables.length; i++) {
+            if (tables[i].number === r.tableNumber) {
+                tables[i].status = "occupied";
+            }
+        }
     }
 
     setFlash(
@@ -2160,138 +2785,6 @@ function loadBillingSession() {
 
     setFlash(
         `${selected.name} selected for billing.`
-    );
-
-    render();
-}
-
-/* BUFFET PACKAGES */
-
-function renderBuffetPackages() {
-    return `
-        <div class="card">
-            ${head(
-                "Buffet Packages",
-                "Select a checked-in customer and review package quantities."
-            )}
-
-            ${flash()}
-
-            <div class="session">
-                <label>Customer / Table</label>
-
-                <select id="billing-session">
-                    ${sessionOptions()}
-                </select>
-
-                <button
-                    class="btn"
-                    style="margin-top:10px"
-                    onclick="loadBillingSession()"
-                >
-                    Load Customer
-                </button>
-            </div>
-
-            ${
-                currentOrder.sourceId
-                    ? `
-                        <p>
-                            <b>
-                                ${currentOrder.reservationName}
-                            </b>
-                            —
-                            Table ${currentOrder.tableNumber}
-                        </p>
-                      `
-                    : `
-                        <p class="empty">
-                            Select a customer first.
-                        </p>
-                      `
-            }
-
-            <table>
-                <thead>
-                    <tr>
-                        <th>Package</th>
-                        <th>Price</th>
-                        <th>Qty</th>
-                    </tr>
-                </thead>
-
-                <tbody>
-                    ${packages.map(p => `
-                        <tr>
-                            <td>${p.type}</td>
-                            <td>₱${p.price}</td>
-
-                            <td>
-                                <input
-                                    id="bp-${p.type.toLowerCase()}"
-                                    type="number"
-                                    min="0"
-                                    value="${
-                                        currentOrder[
-                                            p.type.toLowerCase()
-                                        ]
-                                    }"
-                                    ${
-                                        currentOrder.sourceId
-                                            ? ""
-                                            : "disabled"
-                                    }
-                                >
-                            </td>
-                        </tr>
-                    `).join("")}
-                </tbody>
-            </table>
-
-            <button
-                class="btn"
-                style="margin-top:14px"
-                onclick="savePackages()"
-                ${
-                    currentOrder.sourceId
-                        ? ""
-                        : "disabled"
-                }
-            >
-                Save selection
-            </button>
-        </div>
-    `;
-}
-
-function savePackages() {
-    if (!currentOrder.sourceId) {
-        setFlash(
-            "Select a customer first.",
-            "err"
-        );
-
-        render();
-        return;
-    }
-
-    currentOrder.adult =
-        +document.getElementById(
-            "bp-adult"
-        ).value || 0;
-
-    currentOrder.kid =
-        +document.getElementById(
-            "bp-kid"
-        ).value || 0;
-
-    currentOrder.senior =
-        +document.getElementById(
-            "bp-senior"
-        ).value || 0;
-
-    setFlash(
-        "Package selection saved."
     );
 
     render();
@@ -2817,11 +3310,14 @@ function renderPayment() {
                 </div>
             </div>
 
-            ${
-                lastReceipt
-                    ? receiptHtml(lastReceipt)
-                    : ""
-            }
+            ${lastReceipt ? `
+                ${receiptHtml(lastReceipt)}
+                <div style="text-align:center;margin-top:12px">
+                    <button class="btn" onclick="printReceipt('${escapeHtml(lastReceipt.transactionId)}')">
+                        Print Receipt
+                    </button>
+                </div>
+            ` : ""}
         </div>
     `;
 }
@@ -2975,12 +3471,21 @@ function processPayment() {
     }
 
     if (currentOrder.tableNumber) {
-        releaseTableSeats(
-            currentOrder.tableNumber,
-            currentOrder.sourceType,
-            currentOrder.sourceId
-        );
+        for (
+            let i = 0;
+            i < tables.length;
+            i++
+        ) {
+            if (
+                tables[i].number ===
+                currentOrder.tableNumber
+            ) {
+                tables[i].status = "available";
+            }
+        }
     }
+
+    saveSharedReservations();
 
     setFlash(
         `Payment completed for ${record.name}. Transaction ${record.transactionId} saved.`
@@ -3068,181 +3573,6 @@ function transactionTable(list) {
             </tbody>
         </table>
     `;
-}
-
-function renderReceipts() {
-    let list = [...transactions];
-
-    list.reverse();
-
-    let options =
-        '<option value="">Select a receipt</option>';
-
-    for (let i = 0; i < list.length; i++) {
-        options += `
-            <option value="${list[i].transactionId}">
-                ${list[i].transactionId}
-                - ${list[i].name}
-            </option>
-        `;
-    }
-
-    return `
-        <div class="card">
-            ${head(
-                "Receipts",
-                "Search and print completed customer receipts."
-            )}
-
-            ${flash()}
-
-            <div class="row">
-                <div>
-                    <label>
-                        Transaction ID or Customer Name
-                    </label>
-
-                    <input
-                        id="tx-query"
-                        oninput="searchTransactions()"
-                    >
-                </div>
-
-                <div>
-                    <label>
-                        Select Receipt
-                    </label>
-
-                    <select
-                        id="receipt-select"
-                        onchange="showReceipt()"
-                    >
-                        ${options}
-                    </select>
-                </div>
-            </div>
-
-            <div id="tx-results">
-                ${transactionTable(list)}
-            </div>
-
-            <div id="receipt-preview"></div>
-        </div>
-    `;
-}
-
-function searchTransactions() {
-    const q =
-        (
-            document.getElementById(
-                "tx-query"
-            ).value || ""
-        )
-            .trim()
-            .toLowerCase();
-
-    let list = [];
-
-    for (let i = 0; i < transactions.length; i++) {
-        const t = transactions[i];
-
-        if (
-            !q ||
-            t.transactionId
-                .toLowerCase()
-                .includes(q) ||
-            t.name
-                .toLowerCase()
-                .includes(q)
-        ) {
-            list[list.length] = t;
-        }
-    }
-
-    list.reverse();
-
-    const select =
-        document.getElementById(
-            "receipt-select"
-        );
-
-    const old =
-        select
-            ? select.value
-            : "";
-
-    let options =
-        '<option value="">Select a receipt</option>';
-
-    for (let i = 0; i < list.length; i++) {
-        options += `
-            <option value="${list[i].transactionId}">
-                ${list[i].transactionId}
-                - ${list[i].name}
-            </option>
-        `;
-    }
-
-    if (select) {
-        select.innerHTML = options;
-        select.value = old;
-    }
-
-    document.getElementById(
-        "tx-results"
-    ).innerHTML =
-        transactionTable(list);
-
-    showReceipt();
-}
-
-function showReceipt() {
-    const id =
-        document.getElementById(
-            "receipt-select"
-        ).value;
-
-    const box =
-        document.getElementById(
-            "receipt-preview"
-        );
-
-    if (!id) {
-        box.innerHTML = "";
-        return;
-    }
-
-    let transaction = null;
-
-    for (
-        let i = 0;
-        i < transactions.length;
-        i++
-    ) {
-        if (
-            transactions[i].transactionId === id
-        ) {
-            transaction = transactions[i];
-            break;
-        }
-    }
-
-    if (transaction) {
-        box.innerHTML =
-            receiptHtml(transaction) +
-            `
-                <div
-                    style="text-align:center;margin-top:12px"
-                >
-                    <button
-                        class="btn"
-                        onclick="printReceipt('${transaction.transactionId}')"
-                    >
-                        Print Receipt
-                    </button>
-                </div>
-            `;
-    }
 }
 
 function printReceipt(id) {
@@ -3465,18 +3795,17 @@ function renderDailyReport() {
 const RENDERERS = {
     reservations: renderReservations,
     findReservation: renderFindReservation,
+    diningMonitor: renderDiningMonitor,
     cancelReservation: renderCancelReservation,
     sortReservations: renderSortReservations,
     tableAvailability: renderTableAvailability,
     assignTable: renderAssignTable,
     waitlist: renderWaitlist,
     checkIn: renderCheckIn,
-    buffetPackages: renderBuffetPackages,
     guestCount: renderGuestCount,
     billSummary: renderBillSummary,
     discounts: renderDiscounts,
     payment: renderPayment,
-    receipts: renderReceipts,
     dailyReport: renderDailyReport
 };
 
@@ -3504,4 +3833,35 @@ function render() {
 
 document.addEventListener("keydown", handleSectionKeyboard);
 
+loadSharedReservations();
+
+window.addEventListener("storage", function (event) {
+    if (event.key === STAFF_NOTICE_STORAGE_KEY) {
+        const notice = readStaffNotice();
+
+        if (notice && currentUser) {
+            setFlash(notice.text);
+            render();
+        }
+
+        return;
+    }
+
+    if (event.key !== RESERVATION_STORAGE_KEY) {
+        return;
+    }
+
+    loadSharedReservations();
+
+    if (currentUser) {
+        render();
+    } else if (customerView === "confirmation" && customerConfirmation) {
+        customerConfirmation = findReservationById(customerConfirmation.id);
+        renderCustomer();
+    } else if (customerView === "lookup") {
+        renderCustomer();
+    }
+});
+
 tick();
+showCustomerHome();
