@@ -44,6 +44,21 @@ button {
     text-shadow: 0 1px 0 rgba(0, 0, 0, 0.06);
 }
 
+.topbar-brand,
+.customer-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.topbar-brand-logo {
+    width: 68px;
+    height: 68px;
+    flex: 0 0 auto;
+    object-fit: contain;
+}
+
 .sub {
     font-size: 11px;
     color: #777;
@@ -301,6 +316,11 @@ td {
     color: #664d03;
 }
 
+.pill.confirmed {
+    background: #dcebe8;
+    color: #22584f;
+}
+
 .pill.arrived {
     background: #d5e8d5;
     color: #245b28;
@@ -311,19 +331,124 @@ td {
     color: #842029;
 }
 
-.flash {
-    padding: 9px 11px;
-    margin-bottom: 13px;
-    border: 1px solid #c9b0b0;
-    background: #f8eeee;
-    color: #550000;
+#toastContainer {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    pointer-events: none;
 }
 
-.flash.err {
-    padding: 8px 10px;
-    border-color: #d9aeb1;
-    background: #fcebec;
+.toast {
+    max-width: min(360px, calc(100vw - 32px));
+    padding: 14px 16px;
+    border-radius: 14px;
+    border-left: 4px solid #2e7d32;
+    background: rgba(244, 250, 244, 0.98);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+    color: #1f3d2b;
+    font-weight: 700;
+    line-height: 1.45;
+}
+
+.toast.err {
+    border-left-color: #b42318;
+    background: rgba(255, 241, 242, 0.98);
+    color: #7a1f1f;
+}
+
+.dining-monitor {
+    padding: 15px;
+    margin-bottom: 16px;
+    border: 1px solid #ccc;
+    background: #f8f8f6;
+}
+
+.dining-monitor h2 {
+    margin: 0 0 12px;
+    font-size: 17px;
+}
+
+.dining-monitor-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 10px;
+}
+
+.dining-monitor-card {
+    padding: 12px;
+    border: 1px solid #d4d4cf;
+    border-left: 4px solid #54865a;
+    background: #fff;
+}
+
+.dining-monitor-card.warning {
+    border-left-color: #b87513;
+}
+
+.dining-monitor-card.ended {
+    border-left-color: #a52e2e;
+}
+
+.dining-monitor-customer,
+.dining-monitor-times {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 6px 12px;
+}
+
+.dining-monitor-customer strong {
+    font-size: 15px;
+}
+
+.dining-monitor-times {
+    margin-top: 6px;
+    color: #666;
+    font-size: 12px;
+}
+
+.dining-monitor-card p {
+    margin: 8px 0 0;
+}
+
+.dining-countdown {
+    font-family: "Courier New", monospace;
+    font-size: 16px;
+}
+
+.dining-notice {
+    display: none;
+    padding: 9px 10px;
+    margin-top: 10px;
+    font-weight: 700;
+}
+
+.dining-notice.warning {
+    display: block;
+    border: 1px solid #dfbd76;
+    background: #fff4d6;
+    color: #704800;
+}
+
+.dining-notice.ended {
+    display: block;
+    border: 1px solid #d59a9a;
+    background: #fce9e9;
     color: #842029;
+}
+
+.customer-dining-status.warning {
+    color: #704800;
+    font-weight: 700;
+}
+
+.customer-dining-status.ended {
+    color: #842029;
+    font-weight: 700;
 }
 
 .empty {
@@ -494,9 +619,17 @@ td {
     inset: 0;
     z-index: 9;
     display: flex;
-    align-items: center;
-    justify-content: center;
+    flex-direction: column;
     background: #eee;
+}
+
+.login-stage {
+    display: grid;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    padding: 24px;
+    place-items: center;
 }
 
 .login-card {
@@ -568,6 +701,294 @@ body.logged-out #shell {
     display: none;
 }
 
+body.logged-out #loginOverlay {
+    display: none;
+}
+
+.customer-app {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #f4f1ec;
+    color: #26221d;
+}
+
+.customer-app[hidden] {
+    display: none;
+}
+
+.customer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 16px clamp(20px, 6vw, 88px);
+    background: #fff;
+    border-bottom: 1px solid #ddd6ca;
+}
+
+.customer-brand {
+    color: #550000;
+    font: 44px/1 "Arizonia", cursive;
+}
+
+.customer-brand-logo {
+    width: 62px;
+    height: 62px;
+    flex: 0 0 auto;
+    object-fit: contain;
+}
+
+.customer-header-actions,
+.customer-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+}
+
+.customer-link,
+.customer-primary,
+.customer-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 42px;
+    padding: 10px 16px;
+    border: 1px solid #550000;
+    border-radius: 999px;
+    font-weight: 700;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.customer-link,
+.customer-secondary {
+    background: #fff;
+    color: #550000;
+}
+
+.customer-primary {
+    background: #550000;
+    color: #fff;
+}
+
+.customer-hero {
+    position: relative;
+    isolation: isolate;
+    flex: 1;
+    min-height: 340px;
+    padding: 64px clamp(20px, 8vw, 120px);
+    background: #f4f1ec;
+    color: #26221d;
+}
+
+.customer-hero::before {
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    background-image: url("295049ea-2cf1-42f9-9b67-5a65c67ebc73-removebg-preview.png");
+    background-position: right 9% center;
+    background-repeat: no-repeat;
+    background-size: min(58vw, 560px) auto;
+    content: "";
+    opacity: .14;
+    pointer-events: none;
+}
+
+.customer-hero h1 {
+    max-width: 650px;
+    margin: 0 0 14px;
+    font: 48px/1.08 Georgia, serif;
+    color: #550000;
+}
+
+.customer-hero p {
+    max-width: 590px;
+    margin: 0 0 25px;
+    color: #514842;
+    font-size: 17px;
+    line-height: 1.65;
+}
+
+.customer-hero .customer-primary {
+    border-color: #550000;
+    background: #550000;
+    color: #fff;
+}
+
+.customer-panel {
+    width: min(760px, calc(100% - 32px));
+    margin: 34px auto 60px;
+    padding: clamp(22px, 5vw, 42px);
+    background: #fff;
+    border: 1px solid #ddd6ca;
+}
+
+.customer-panel h1 {
+    margin: 0 0 8px;
+    font: 32px Georgia, serif;
+}
+
+.customer-panel > p {
+    margin: 0 0 24px;
+    color: #625d55;
+    line-height: 1.55;
+}
+
+.customer-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 15px;
+}
+
+.customer-field.full {
+    grid-column: 1 / -1;
+}
+
+.customer-field label {
+    margin-bottom: 6px;
+}
+
+.customer-field input,
+.customer-field textarea {
+    min-height: 42px;
+    border-radius: 3px;
+}
+
+.customer-field textarea {
+    width: 100%;
+    min-height: 88px;
+    padding: 10px;
+    border: 1px solid #bbb;
+    font: inherit;
+    resize: vertical;
+}
+
+.customer-form-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 20px;
+}
+
+.reservation-confirmation {
+    margin-top: 20px;
+    padding: 20px;
+    border: 1px solid #b6c5ad;
+    background: #f2f6ef;
+}
+
+.reservation-confirmation h2 {
+    margin: 0 0 10px;
+    color: #315333;
+}
+
+.reservation-detail-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin: 14px 0 0;
+    border-top: 1px solid #d8e0d3;
+}
+
+.reservation-detail-list > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 8px;
+    border-bottom: 1px solid #d8e0d3;
+}
+
+.reservation-detail-list dt {
+    color: #514842;
+    font-weight: 700;
+}
+
+.reservation-detail-list dd {
+    margin: 0;
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+.customer-cancel-reservation {
+    background: #8d2828;
+    border-color: #8d2828;
+    text-transform: uppercase;
+}
+
+.reservation-reference {
+    display: inline-block;
+    padding: 8px 11px;
+    margin: 5px 0 12px;
+    background: #fff;
+    border: 1px dashed #66815d;
+    font-weight: 700;
+}
+
+.customer-error {
+    margin-top: 14px;
+    color: #9a2525;
+}
+
+.customer-admin-access {
+    width: 100%;
+    margin-top: auto;
+    padding: 14px clamp(20px, 6vw, 88px);
+    background: #550000;
+    color: #fff;
+    text-align: right;
+    font-size: 12px;
+}
+
+.customer-site-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    text-align: left;
+}
+
+.customer-location {
+    min-width: 0;
+    margin: 0;
+    font-style: normal;
+    line-height: 1.5;
+}
+
+.customer-site-team {
+    flex: 0 0 auto;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.login-customer-access {
+    margin-top: 0;
+}
+
+.customer-admin-access button {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-decoration: underline;
+}
+
+@media (max-width: 560px) {
+    .reservation-detail-list {
+        grid-template-columns: 1fr;
+    }
+
+    .customer-site-footer {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .customer-site-team {
+        align-self: flex-end;
+        white-space: normal;
+    }
+}
+
 input::placeholder {
     color: #999;
 }
@@ -597,6 +1018,7 @@ input::placeholder {
     #clock {
         display: none;
     }
+
 }
 
 @media (max-width: 560px) {
@@ -619,5 +1041,79 @@ input::placeholder {
 
     .brand {
         font-size: 19px;
+    }
+
+    .topbar-brand {
+        gap: 7px;
+    }
+
+    .topbar-brand-logo {
+        width: 44px;
+        height: 44px;
+    }
+
+    .customer-header {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .customer-brand {
+        font-size: 34px;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+    }
+
+    .customer-brand-logo {
+        width: 48px;
+        height: 48px;
+    }
+
+    .customer-header-actions {
+        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .customer-header-actions button {
+        min-width: 0;
+        padding-right: 8px;
+        padding-left: 8px;
+    }
+
+    .customer-hero {
+        min-height: 0;
+        padding-top: 42px;
+        padding-bottom: 42px;
+    }
+
+    .customer-hero::before {
+        background-position: right 5% bottom 4%;
+        background-size: min(74vw, 300px) auto;
+        opacity: .12;
+    }
+
+    .customer-hero h1 {
+        max-width: 100%;
+        font-size: 34px;
+        overflow-wrap: anywhere;
+    }
+
+    .customer-hero p {
+        max-width: 100%;
+    }
+
+    .customer-actions > button {
+        flex: 1 1 145px;
+        min-width: 0;
+        padding-right: 10px;
+        padding-left: 10px;
+    }
+
+    .customer-form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .customer-field.full {
+        grid-column: auto;
     }
 }
